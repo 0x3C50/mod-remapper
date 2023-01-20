@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 
-try_cd() {
-    cd "$1" || { echo "Failed to cd into $1. aborting"; exit 1; }  
-}
-
 confirm() {
     # call with a prompt string or use a default
     read -r -p "${1:-Are you sure? [y/N]} " response
@@ -35,9 +31,13 @@ if ! command -v git &> /dev/null; then
     exit 1
 fi
 
+if ! command -v curl &> /dev/null; then
+    echo "The curl command couldn't be found. Install curl first, then re-run the script."
+    exit 1
+fi
+
 BASE_DIR=$(readlink -f "$(dirname -- "$0")")
 r1=$?
-CURRENT_PATH=$(pwd)
 GIT_PATH=$(command -v git)
 r2=$?
 if [ $r1 -ne 0 ] || [ $r2 -ne 0 ]; then
@@ -48,7 +48,6 @@ fi
 return_code_neq_failhard() {
     if [ $? -ne "$1" ]; then
         echo "$2"
-        try_cd "$CURRENT_PATH"
         exit 1
     fi
 }
@@ -57,13 +56,14 @@ echo "Base directory is $BASE_DIR"
 echo "Git @ $GIT_PATH"
 
 if [ "$#" -lt 2 ]; then
-    echo "Syntax: modRemapper.sh modJarfile.jar gameVersion"
-    echo "Example: modRemapper.sh modJarfile.jar 1.19.3 # mod compiled for minecraft 1.19.3"
+    echo "Syntax: modRemapper.sh modJarfile.jar mappingsToUse"
+    echo "Example: modRemapper.sh modJarfile.jar 1.19.3+build.5 # mod compiled for minecraft 1.19.3, use 5th build of mappings. See https://fabricmc.net/develop/"
     exit 0
 fi
 
 INP_JAR="$1"
 GAME_VERSION="$2"
+TMP_DIR=".tmp"
 echo "Input jarfile is $INP_JAR"
 echo "Game version is $GAME_VERSION"
 
@@ -71,75 +71,38 @@ if [ ! -f "$INP_JAR" ]; then
     echo "fatal: Input jarfile does not exist or is not a file"
     exit 1
 fi
-if [ -e "$BASE_DIR/mappings" ]; then
-    confirm "Mappings directory already exists. Replace? (Recommended yes, mappings might've changed) [Y/n]" && rm -rf "$BASE_DIR/mappings"
-fi
-if [ -e "$BASE_DIR/tiny-remapper" ]; then
-    confirm "Tiny remapper already exists. Re-download? [y/N]" && rm -rf "$BASE_DIR/tiny-remapper"
-fi
 
-MAPPINGS_LOC="$BASE_DIR/mappings/build/libs/tmp_out/mappings/mappings.tiny"
-if [ ! -e "$BASE_DIR/mappings" ]; then
-    echo "[+] Cloning yarn..."
-    git clone -b "$GAME_VERSION" "https://github.com/FabricMC/yarn" "$BASE_DIR/mappings"
-    return_code_neq_failhard 0 "Failed to clone repository https://github.com/FabricMC/yarn on branch $GAME_VERSION to $BASE_DIR/mappings. Please correct the above error first"
+MAPPINGS_LOC="$BASE_DIR/$TMP_DIR/mappings/mappings.tiny"
+MAPPINGS_URL="https://maven.fabricmc.net/net/fabricmc/yarn/$GAME_VERSION/yarn-$GAME_VERSION-v2.jar"
 
-    echo "[+] Building mappings, this might take a while..."
-    try_cd "$BASE_DIR/mappings" # we need go to here because of gradle
-    if [ ! -f "$BASE_DIR/mappings/gradlew" ] || [ ! -f "$BASE_DIR/mappings/build.gradle" ]; then
-        echo "Failed to find gradlew or build.gradle in mappings directory. Not sure how we got here..."
-        echo "BASE_DIR=\"$BASE_DIR\""
-        try_cd "$CURRENT_PATH"
-        exit 1
-    fi
-    "$BASE_DIR/mappings/gradlew" "clean" "build"
-    return_code_neq_failhard 0 "Gradle failed to build. Please correct any errors and re-run the script"
-
-    TARGET_JAR="$BASE_DIR/mappings/build/libs/yarn-$GAME_VERSION+build.local-mergedv2.jar"
-    if [ ! -f "$TARGET_JAR" ]; then
-        echo "Failed to find target jar $TARGET_JAR. This shouldn't happen, please report this as an issue"
-        try_cd "$CURRENT_PATH"
-        exit 1
-    fi
-
-    unzip "$TARGET_JAR" -d "$BASE_DIR/mappings/build/libs/tmp_out"
-    return_code_neq_failhard 0 "Unzip exited with non-zero exit code. Cannot continue"
-    if [ ! -f "$MAPPINGS_LOC" ]; then
-        echo "Failed to find mappings.tiny at $MAPPINGS_LOC. Can't continue"
-        try_cd "$CURRENT_PATH"
-        exit 1
-    fi
-
-    echo "[+] Done building mappings"
-    try_cd "$BASE_DIR" # back to home
-fi
-
-if [ ! -d "$BASE_DIR/tiny-remapper" ]; then # we would've deleted this one previously, if we'd want to update it
-    echo "[+] Cloning tiny-remapper..."
-    git clone "https://github.com/FabricMC/tiny-remapper" "$BASE_DIR/tiny-remapper"
-    return_code_neq_failhard 0 "Failed to clone repository https://github.com/FabricMC/tiny-remapper to $BASE_DIR/tiny-remapper. Please correct the above error first"
-
-    echo "[+] Building tiny-remapper..."
-    try_cd "$BASE_DIR/tiny-remapper"
-    if [ ! -f "$BASE_DIR/tiny-remapper/gradlew" ] || [ ! -f "$BASE_DIR/tiny-remapper/build.gradle" ]; then
-        echo "Failed to find gradlew or build.gradle in tiny-remapper directory. Not sure how we got here..."
-        try_cd "$CURRENT_PATH"
-        exit 1
-    fi
-
-    "$BASE_DIR/tiny-remapper/gradlew" "clean" "shadowJar"
-    return_code_neq_failhard 0 "Gradle failed to build. Please correct any errors and re-run the script"
-fi
-
-TINY_REMAPPER_LOC="$(find "$BASE_DIR/tiny-remapper/build/libs" -name "tiny-remapper-*+local-fat.jar")"
-if [ ! -f "$TINY_REMAPPER_LOC" ]; then
-    echo "Failed to find tiny-remapper @ $TINY_REMAPPER_LOC. Did you delete it since last time? Try re-downloading tiny-remapper at the start of this script"
-    try_cd "$CURRENT_PATH"
+echo "[+] Getting mappings @ $MAPPINGS_URL ..."
+if [ "200" != "$(curl -LI "$MAPPINGS_URL" -o /dev/null -w '%{http_code}\n' -s)" ]; then
+    echo "Server returned non-200 code, does the mappings version exist?"
     exit 1
 fi
+
+if [ -e "$BASE_DIR/$TMP_DIR" ]; then
+    rm -vr "${BASE_DIR:-"."}/${TMP_DIR:-"the_void_aabbcc123123123"}" # be VERY careful here
+fi
+mkdir -p "$BASE_DIR/$TMP_DIR"
+OUT_JF="$BASE_DIR/$TMP_DIR/mappings-$GAME_VERSION.jar"
+
+curl -L --progress-bar "$MAPPINGS_URL" -o "$OUT_JF"
+return_code_neq_failhard 0 "Failed to download mappings. Please report this as a bug."
+
+unzip "$OUT_JF" -d "$BASE_DIR/$TMP_DIR"
+
+TINY_REMAPPER_LOC="$BASE_DIR/tiny-remapper.jar"
+if [ ! -f "$TINY_REMAPPER_LOC" ]; then
+    echo "[+] Downloading tiny-remapper..."
+    curl -L --progress-bar "https://maven.fabricmc.net/net/fabricmc/tiny-remapper/0.8.6/tiny-remapper-0.8.6-fat.jar" -o "$TINY_REMAPPER_LOC"
+    return_code_neq_failhard 0 "Failed to download tiny-remapper. Please report this as a bug."
+fi
+
 echo "[+] Running tiny-remapper"
 OUT_JAR="$(dirname "$INP_JAR")/$(basename "$INP_JAR" ".jar")-remapped.jar"
 java -jar "$TINY_REMAPPER_LOC" "$INP_JAR" "$OUT_JAR" "$MAPPINGS_LOC" "intermediary" "named"
 return_code_neq_failhard 0 "Failed to remap. Not sure how to continue from here..."
 
 echo "[+] Done remapping! Remapped jarfile @ $OUT_JAR"
+rm -r "$BASE_DIR/.tmp"
